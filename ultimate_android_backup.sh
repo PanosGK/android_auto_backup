@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================================
-# ===            Unified Android Backup & USB Mount Utility             ===
+# ===           Unified Android Backup & USB Mount Utility            ===
 # =========================================================================
 # This script combines mounting a USB drive, backing up an Android device
 # to either the USB or the local computer, and then unmounting the drive.
@@ -11,14 +11,17 @@
 
 # --- Sudo Check: Ensure script is run as root ---
 if [[ $EUID -ne 0 ]]; then
-   echo "This script needs admin rights to work. Trying again..."
-   exec sudo -- "$0" "$@"
-   exit 1
+    echo "This script needs admin rights to work. Trying again..."
+    exec sudo -- "$0" "$@"
+    exit 1
 fi
 
 # =========================================================================
-# ---                         CONFIGURATION                             ---
+# ---                         CONFIGURATION                           ---
 # =========================================================================
+
+# Set this to "true" to enable logging, or "false" to disable.
+logs="true"
 
 USB_MOUNT_FOLDER_NAME="Android_Backup_USB"
 ANDROID_ROOT_DIR="/sdcard"
@@ -38,8 +41,15 @@ LOCAL_BACKUP_BASE_DIR="$USER_HOME/Desktop/Android_Backups"
 RESET="\033[0m"; BOLD="\033[1m"; GREEN="\033[0;32m"; YELLOW="\033[0;33m"; RED="\033[0;31m"; BLUE="\033[0;34m"
 
 # =========================================================================
-# ---                       UTILITY FUNCTIONS                           ---
+# ---                         UTILITY FUNCTIONS                         ---
 # =========================================================================
+
+# --- Logging Function ---
+function log() {
+    if [[ "$logs" == "true" ]]; then
+        echo -e "[LOG] $1" >&2
+    fi
+}
 
 function update_progress() {
     local message="$1"
@@ -71,40 +81,70 @@ function count_vcf_contacts() {
 }
 
 # =========================================================================
-# ---                      CORE LOGIC FUNCTIONS                         ---
+# ---                     CORE LOGIC FUNCTIONS                          ---
 # =========================================================================
 
 function mount_usb() {
-    echo -e "${BLUE}--- Preparing Your USB Drive ---${RESET}" >&2
+    log "Starting mount_usb function."
     local MOUNT_POINT="$USER_HOME/Desktop/$USB_MOUNT_FOLDER_NAME"
-    local USB_DISK_PATH=$(lsblk -p -o NAME,TRAN,TYPE -n | awk '$2=="usb" && $3=="disk" {print $1; exit}')
+
+    echo -e "${BLUE}--- Preparing Your USB Drive ---${RESET}" >&2
+
+    log "Checking if USB drive is already mounted at $MOUNT_POINT."
+    if mountpoint -q "$MOUNT_POINT"; then
+        echo -e "${GREEN}OK. USB drive is already mounted at ${BOLD}$MOUNT_POINT${RESET}${GREEN}. Proceeding...${RESET}" >&2
+        log "USB already mounted. Returning success."
+        echo "$MOUNT_POINT"
+        return 0
+    fi
+    
+    log "USB not mounted. Searching for an unmounted USB disk."
+    local USB_DISK_PATH=$(lsblk -p -o NAME,TRAN,TYPE,MOUNTPOINT -n | awk '$2=="usb" && $3=="disk" && $4=="" {print $1; exit}')
+
     if [[ -z "$USB_DISK_PATH" ]]; then
-        echo -e "${RED}Error: Could not find a USB drive.${RESET}" >&2
+        echo -e "${RED}Error: Could not find an unmounted USB drive.${RESET}" >&2
+        log "No unmounted USB disk found. Returning failure."
         return 1
     fi
+
+    log "Found unmounted USB disk: $USB_DISK_PATH. Checking for partition."
     local DEVICE="${USB_DISK_PATH}1"
+
+    if [ ! -b "$DEVICE" ]; then
+        log "Partition ${USB_DISK_PATH}1 not found. Searching for any unmounted USB partition."
+        DEVICE=$(lsblk -p -o NAME,TRAN,TYPE,MOUNTPOINT -n | awk '$2=="usb" && $3=="part" && $4=="" {print $1; exit}')
+    fi
+
     if [ ! -b "$DEVICE" ]; then
         echo -e "${RED}Error: Found a USB drive, but could not find a partition on it.${RESET}" >&2
+        log "No partition found. Returning failure."
         return 1
     fi
+    
+    log "Found partition: $DEVICE. Attempting to create mount point and mount device."
     umount "$MOUNT_POINT" &> /dev/null
     if [ ! -d "$MOUNT_POINT" ]; then
         mkdir -p "$MOUNT_POINT"
         chown "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$MOUNT_POINT"
     fi
+
     local USER_ID=$(id -u "$ORIGINAL_USER")
     local GROUP_ID=$(id -g "$ORIGINAL_USER")
     echo "Please wait..." >&2
+
     if mount -o "uid=$USER_ID,gid=$GROUP_ID" "$DEVICE" "$MOUNT_POINT"; then
         echo -e "${GREEN}OK. Your USB drive is ready.${RESET}" >&2
+        log "Mount successful. Returning mount point: $MOUNT_POINT."
         echo "$MOUNT_POINT"
         return 0
     else
         echo -e "${RED}Error: Could not get the USB drive ready for backup.${RESET}" >&2
         rmdir "$MOUNT_POINT" &> /dev/null
+        log "Mount failed. Returning failure."
         return 1
     fi
 }
+
 
 function unmount_usb() {
     local MOUNT_POINT="$1"
@@ -139,7 +179,7 @@ function generate_log_report() {
     # Create or overwrite the log file
     {
         echo "====================================================="
-        echo "               Android Backup Log"
+        echo "           Android Backup Log"
         echo "====================================================="
         echo "Date:           $(date)"
         echo "Phone Model:    $device_model"
@@ -294,59 +334,68 @@ function backup_android() {
 }
 
 # =========================================================================
-# ---                          MAIN MENU                              ---
+# ---                         MAIN MENU                               ---
 # =========================================================================
 function main_menu() {
     while true; do
         clear
         echo -e "${BOLD}--- Phone Backup Tool ---${RESET}"
         echo ""
-        echo -e "   ${GREEN}--- Full Backup ---${RESET}"
-        echo -e "   ${YELLOW}1)${RESET} Backup to connected ${BOLD}USB Drive${RESET} (Mount -> Backup -> Eject)"
-        echo -e "   ${YELLOW}2)${RESET} Backup to the ${BOLD}Computer's Desktop${RESET}"
+        echo -e "    ${GREEN}--- Full Backup ---${RESET}"
+        echo -e "    ${YELLOW}1)${RESET} Backup to connected ${BOLD}USB Drive${RESET} (Mount -> Backup -> Eject)"
+        echo -e "    ${YELLOW}2)${RESET} Backup to the ${BOLD}Computer's Desktop${RESET}"
         echo ""
-        echo -e "   ${BLUE}--- Manual USB Control ---${RESET}"
-        echo -e "   ${YELLOW}3)${RESET} Mount USB Drive Only"
-        echo -e "   ${YELLOW}4)${RESET} Eject USB Drive Only"
+        echo -e "    ${BLUE}--- Manual USB Control ---${RESET}"
+        echo -e "    ${YELLOW}3)${RESET} Mount USB Drive Only"
+        echo -e "    ${YELLOW}4)${RESET} Eject USB Drive Only"
         echo ""
-        echo -e "   ${YELLOW}5)${RESET} Exit"
+        echo -e "    ${YELLOW}5)${RESET} Exit"
         echo ""
         read -p "Type a number and press Enter: " choice
 
         case $choice in
             1)
                 echo ""
-                local usb_path=$(mount_usb)
-                if [ -n "$usb_path" ] && mountpoint -q "$usb_path"; then
+                local usb_path
+                log "User chose option 1. Calling mount_usb."
+                if usb_path=$(mount_usb); then
+                    log "mount_usb succeeded. Calling backup_android."
                     backup_android "$usb_path"
                     read -p "Press Enter to safely eject the USB drive..."
                     unmount_usb "$usb_path"
+                else
+                    log "mount_usb failed. Returning to main menu."
+                    echo -e "\nReturning to the main menu..."
+                    sleep 3
                 fi
-                echo -e "\nReturning to the main menu..."
-                sleep 3
                 ;;
             2)
                 echo ""
+                log "User chose option 2. Calling backup_android with local path."
                 backup_android "$LOCAL_BACKUP_BASE_DIR"
                 read -p "Press Enter to return to the main menu..."
                 ;;
             3)
                 echo ""
+                log "User chose option 3. Calling mount_usb."
                 mount_usb >/dev/null
                 read -p "Press Enter to return to the main menu..."
                 ;;
             4)
                 echo ""
+                log "User chose option 4. Calling unmount_usb."
                 local mount_point_to_check="$USER_HOME/Desktop/$USB_MOUNT_FOLDER_NAME"
                 unmount_usb "$mount_point_to_check"
                 read -p "Press Enter to return to the main menu..."
                 ;;
             5)
                 echo "Goodbye!"
+                log "User chose option 5. Exiting script."
                 break
                 ;;
             *)
                 echo -e "\n${RED}Invalid choice. Please type a number from 1 to 5.${RESET}"
+                log "Invalid choice: $choice."
                 sleep 2
                 ;;
         esac
