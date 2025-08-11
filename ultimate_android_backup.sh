@@ -90,6 +90,21 @@ function mount_usb() {
 
     echo -e "${BLUE}--- Preparing Your USB Drive ---${RESET}" >&2
 
+    # Check if the mount point folder exists. Create it if it doesn't.
+    log "Checking if mount point folder exists: $MOUNT_POINT"
+    if [ ! -d "$MOUNT_POINT" ]; then
+        echo -e "${YELLOW}Mount point folder does not exist. Creating it now...${RESET}" >&2
+        if mkdir -p "$MOUNT_POINT"; then
+            chown "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$MOUNT_POINT"
+            echo -e "${GREEN}Folder created and permissions set.${RESET}" >&2
+            log "Mount point folder created and permissions set."
+        else
+            echo -e "${RED}Error: Could not create mount point folder. Exiting.${RESET}" >&2
+            log "Failed to create mount point folder. Returning failure."
+            return 1
+        fi
+    fi
+
     log "Checking if USB drive is already mounted at $MOUNT_POINT."
     if mountpoint -q "$MOUNT_POINT"; then
         echo -e "${GREEN}OK. USB drive is already mounted at ${BOLD}$MOUNT_POINT${RESET}${GREEN}. Proceeding...${RESET}" >&2
@@ -121,12 +136,8 @@ function mount_usb() {
         return 1
     fi
     
-    log "Found partition: $DEVICE. Attempting to create mount point and mount device."
+    log "Found partition: $DEVICE. Attempting to mount device."
     umount "$MOUNT_POINT" &> /dev/null
-    if [ ! -d "$MOUNT_POINT" ]; then
-        mkdir -p "$MOUNT_POINT"
-        chown "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$MOUNT_POINT"
-    fi
 
     local USER_ID=$(id -u "$ORIGINAL_USER")
     local GROUP_ID=$(id -g "$ORIGINAL_USER")
@@ -139,7 +150,6 @@ function mount_usb() {
         return 0
     else
         echo -e "${RED}Error: Could not get the USB drive ready for backup.${RESET}" >&2
-        rmdir "$MOUNT_POINT" &> /dev/null
         log "Mount failed. Returning failure."
         return 1
     fi
@@ -153,13 +163,11 @@ function unmount_usb() {
     echo "Please wait..."
     if findmnt -r --target "$MOUNT_POINT" > /dev/null; then
         if umount "$MOUNT_POINT"; then
-            rmdir "$MOUNT_POINT" &> /dev/null
             echo -e "${GREEN}Done. You can now safely remove the USB drive.${RESET}"
         else
             echo -e "${YELLOW}Warning: Could not eject the drive. A program may still be using it.${RESET}"
         fi
     else
-        rmdir "$MOUNT_POINT" &> /dev/null
         echo -e "${GREEN}Done. You can now safely remove the USB drive.${RESET}"
     fi
     return 0
@@ -267,6 +275,7 @@ function backup_android() {
     local -a skipped_files=()
     local -a failed_files=()
     local files_processed=0
+    local user_response
 
     for file_entry in "${all_files_on_phone[@]}"; do
         files_processed=$((files_processed + 1))
@@ -286,7 +295,17 @@ function backup_android() {
             if adb pull "$SOURCE_FULL_PATH_ON_PHONE" "$LOCAL_FILE_PATH" &>/dev/null; then
                 successful_files+=("$RELATIVE_PATH")
             else
+                printf "\r%*s\r" "$(tput cols)" "" >&3 # Clear progress bar
+                echo -e "${RED}${BOLD}Error: Could not copy file: ${RELATIVE_PATH}${RESET}" >&3
                 failed_files+=("$RELATIVE_PATH")
+                echo -e "Check for problems with the phone connection or file permissions." >&3
+                read -n 1 -p "Press Enter to continue (skip this file), or 'q' to quit: " user_response >&3
+                echo "" >&3
+                if [[ "$user_response" == "q" || "$user_response" == "Q" ]]; then
+                    printf "\r%*s\r" "$(tput cols)" "" >&3
+                    echo -e "${YELLOW}Backup aborted by user.${RESET}" >&3
+                    exit 1
+                fi
             fi
         fi
     done
